@@ -465,6 +465,18 @@ The `remoteSessions` setting is user-wide, so it also enables remote control for
 sessions started outside copilotd. If the settings file is read-only or cannot be updated, copilotd
 logs a warning and sessions may not be remotely steerable.
 
+If the newer `remoteSessions` mode does not publish sessions in your environment, pin a CLI that
+still supports `--remote` (for example 1.0.102) and disable its auto-update. Add to
+`~/.copilotd/.env`:
+
+```dotenv
+COPILOTD_COPILOT_PATH=C:\Users\me\AppData\Local\copilotd-cli\1.0.102\node_modules\@github\copilot-win32-x64\copilot.exe
+COPILOTD_COPILOT_NO_AUTO_UPDATE=true
+```
+
+copilotd then detects the pinned version and launches control, agent, and dispatch sessions with
+`--remote`, which produces the GitHub task URLs shown by `copilotd status`.
+
 ### Models and DeepSeek
 
 copilotd uses DeepSeek by default. Two modes are supported, selected automatically:
@@ -596,6 +608,8 @@ container orchestration configurable without editing persisted config:
 | `COPILOTD_PROVIDER_API_KEY` | BYOK API key |
 | `COPILOTD_PROVIDER_API_KEY_ENV` | Extra environment variable name to consult for the key |
 | `DEEPSEEK_API_KEY` | Direct DeepSeek API key (activates BYOK) |
+| `COPILOTD_COPILOT_PATH` | Pin the Copilot CLI executable instead of using `copilot` from `PATH` |
+| `COPILOTD_COPILOT_NO_AUTO_UPDATE` | Pass `--no-auto-update` to every CLI invocation (use with a pinned CLI) |
 | `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_MODEL` | Standard Copilot CLI BYOK variables; honored directly |
 
 ### Rule settings

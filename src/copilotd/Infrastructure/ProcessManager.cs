@@ -152,7 +152,7 @@ public sealed partial class ProcessManager
                 si.dwFlags = STARTF_USESHOWWINDOW;
                 si.wShowWindow = SW_HIDE;
 
-                var cmdLine = $"copilot {args}";
+                var cmdLine = _copilotCli.BuildWindowsCommandLine(args);
                 var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
                 var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(launchEnvironment);
 
@@ -213,8 +213,8 @@ public sealed partial class ProcessManager
             {
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "copilot",
-                    Arguments = args,
+                    FileName = _copilotCli.ExecutablePath,
+                    Arguments = _copilotCli.BuildArguments(args),
                     WorkingDirectory = repoPath,
                     UseShellExecute = false,
                     RedirectStandardOutput = false,
@@ -1125,7 +1125,7 @@ public sealed partial class ProcessManager
                 si.dwFlags = STARTF_USESHOWWINDOW;
                 si.wShowWindow = SW_HIDE;
 
-                var cmdLine = $"copilot {arguments}";
+                var cmdLine = _copilotCli.BuildWindowsCommandLine(arguments);
                 var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
                 var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(environmentOverrides);
 
@@ -1187,8 +1187,8 @@ public sealed partial class ProcessManager
 
             var psi = new ProcessStartInfo
             {
-                FileName = "copilot",
-                Arguments = arguments,
+                FileName = _copilotCli.ExecutablePath,
+                Arguments = _copilotCli.BuildArguments(arguments),
                 WorkingDirectory = workingDirectory,
                 UseShellExecute = false,
                 RedirectStandardOutput = false,

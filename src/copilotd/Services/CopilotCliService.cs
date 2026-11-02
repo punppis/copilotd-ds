@@ -20,15 +20,54 @@ public sealed class CopilotCliService
     /// </summary>
     private static readonly Version MinimumRemoteSettingsVersion = new(1, 0, 103);
 
+    public const string ExecutablePathVariable = "COPILOTD_COPILOT_PATH";
+    public const string NoAutoUpdateVariable = "COPILOTD_COPILOT_NO_AUTO_UPDATE";
+
     private readonly ILogger<CopilotCliService> _logger;
 
     public CopilotCliService(ILogger<CopilotCliService> logger)
     {
         _logger = logger;
+        var dotEnv = DotEnvLoader.Load();
+        ExecutablePath = FirstNonEmpty(
+            Environment.GetEnvironmentVariable(ExecutablePathVariable),
+            dotEnv.GetValueOrDefault(ExecutablePathVariable)) ?? "copilot";
+        NoAutoUpdate = IsTruthy(Environment.GetEnvironmentVariable(NoAutoUpdateVariable))
+                       || IsTruthy(dotEnv.GetValueOrDefault(NoAutoUpdateVariable));
     }
 
     /// <summary>
-    /// Returns true if the copilot CLI is available on PATH.
+    /// Copilot CLI executable used for version checks and launched sessions.
+    /// Defaults to <c>copilot</c> on PATH and can be overridden with
+    /// <see cref="ExecutablePathVariable"/> to pin a specific installation.
+    /// </summary>
+    public string ExecutablePath { get; }
+
+    /// <summary>
+    /// Whether every CLI invocation should pass <c>--no-auto-update</c>. Set this
+    /// when <see cref="ExecutablePath"/> points at a pinned version so the CLI does
+    /// not load a newer cached package.
+    /// </summary>
+    public bool NoAutoUpdate { get; }
+
+    /// <summary>
+    /// Prefix arguments shared by every CLI invocation (currently <c>--no-auto-update</c>).
+    /// </summary>
+    public string PrefixArguments => NoAutoUpdate ? "--no-auto-update " : "";
+
+    public string BuildArguments(string arguments) => $"{PrefixArguments}{arguments}";
+
+    /// <summary>
+    /// Builds a Windows command line using the configured executable. PATH lookup
+    /// is preserved when the default <c>copilot</c> name is used.
+    /// </summary>
+    public string BuildWindowsCommandLine(string arguments)
+        => string.Equals(ExecutablePath, "copilot", StringComparison.OrdinalIgnoreCase)
+            ? $"copilot {BuildArguments(arguments)}"
+            : $"\"{ExecutablePath}\" {BuildArguments(arguments)}";
+
+    /// <summary>
+    /// Returns true if the configured copilot CLI executable is available.
     /// </summary>
     public bool IsAvailable()
     {
@@ -141,14 +180,31 @@ public sealed class CopilotCliService
         }
     }
 
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return null;
+    }
+
+    private static bool IsTruthy(string? value)
+        => string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(value, "on", StringComparison.OrdinalIgnoreCase);
+
     private (int ExitCode, string Output) RunCopilot(string arguments)
     {
         _logger.LogDebug("Running: copilot {Args}", arguments);
 
         var psi = new ProcessStartInfo
         {
-            FileName = "copilot",
-            Arguments = arguments,
+            FileName = ExecutablePath,
+            Arguments = BuildArguments(arguments),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
