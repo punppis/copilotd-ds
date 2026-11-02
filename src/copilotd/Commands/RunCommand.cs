@@ -136,12 +136,7 @@ public static class RunCommand
                             var previousProcessId = controlSessionBeforeCheck?.ProcessId;
                             var previousProcessStartTime = controlSessionBeforeCheck?.ProcessStartTime;
                             var existingAlive = controlSessionBeforeCheck is not null
-                                && IsControlSessionHealthy(
-                                    controlSessionBeforeCheck,
-                                    processManager,
-                                    remoteSessionUrls,
-                                    config.CurrentUser,
-                                    DateTimeOffset.UtcNow);
+                                && IsControlSessionHealthy(controlSessionBeforeCheck, processManager);
 
                             if (existingAlive)
                             {
@@ -298,12 +293,7 @@ public static class RunCommand
                                         var previousProcessId = controlSessionBeforeCheck?.ProcessId;
                                         var previousProcessStartTime = controlSessionBeforeCheck?.ProcessStartTime;
                                         var controlAlive = controlSessionBeforeCheck is not null
-                                            && IsControlSessionHealthy(
-                                                controlSessionBeforeCheck,
-                                                processManager,
-                                                remoteSessionUrls,
-                                                config.CurrentUser,
-                                                DateTimeOffset.UtcNow);
+                                            && IsControlSessionHealthy(controlSessionBeforeCheck, processManager);
                                         if (controlAlive
                                             && (state.ControlSession!.ProcessId != previousProcessId
                                                 || state.ControlSession.ProcessStartTime != previousProcessStartTime))
@@ -314,15 +304,7 @@ public static class RunCommand
                                         if (!controlAlive)
                                         {
                                             if (state.ControlSession?.ProcessId is not null)
-                                            {
-                                                if (state.ControlSession.Status == ControlSessionStatus.Running
-                                                    && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive)
-                                                {
-                                                    logger.LogWarning("Control session is alive but has no resolvable remote URL; relaunching");
-                                                }
-
                                                 processManager.TerminateControlSession(state.ControlSession);
-                                            }
 
                                             var trustDecision = CheckControlSessionTrust(copilotTrust, logger, controlSessionTrustWarningShown);
                                             controlSessionTrustWarningShown = trustDecision.WarningShown;
@@ -568,29 +550,17 @@ public static class RunCommand
         }
     }
 
-    private static bool IsControlSessionHealthy(
-        ControlSessionInfo session,
-        ProcessManager processManager,
-        GitHubRemoteSessionUrlResolver remoteSessionUrls,
-        string? currentUser,
-        DateTimeOffset now)
+    /// <summary>
+    /// Process liveness determines control-session health. Remote URL resolution can
+    /// fail transiently (for example, expired Copilot GitHub auth) and must not cause
+    /// the session to be relaunched every poll cycle.
+    /// </summary>
+    private static bool IsControlSessionHealthy(ControlSessionInfo session, ProcessManager processManager)
     {
         if (session.Status != ControlSessionStatus.Running)
             return false;
 
-        if (processManager.CheckControlSession(session) != ProcessLivenessResult.Alive)
-            return false;
-
-        if (remoteSessionUrls.TryResolve(session, currentUser) is not null)
-            return true;
-
-        return !HasRemoteUrlResolutionTimedOut(session, now);
-    }
-
-    private static bool HasRemoteUrlResolutionTimedOut(ControlSessionInfo session, DateTimeOffset now)
-    {
-        var startedAt = session.StartedAt ?? session.UpdatedAt;
-        return startedAt is { } started && now - started >= RemoteUrlResolveTimeout;
+        return processManager.CheckControlSession(session) == ProcessLivenessResult.Alive;
     }
 
     private static void CleanupTrackedProcesses(
