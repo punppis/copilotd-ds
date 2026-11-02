@@ -54,6 +54,14 @@ artifacts/
 .idea/
 .control-session/
 .copilotd-home/
+
+# Local provider secrets and Docker bind-mount defaults
+.env
+!.env.example
+.copilot/
+.gh/
+repos/
+copilotd-home/
 *.swp
 *~
 

@@ -61,4 +61,20 @@ public static class CopilotdPaths
 
     public static string GetControlSessionDirectory()
         => Path.Combine(GetCopilotdHomeDirectory(), "control-session");
+
+    /// <summary>
+    /// Root directory for always-on agent session working directories.
+    /// Trusting this root also trusts each <c>agent-N</c> subdirectory.
+    /// </summary>
+    public static string GetAgentsRootDirectory()
+        => Path.Combine(GetCopilotdHomeDirectory(), "agents");
+
+    public static string GetAgentSessionDirectory(int index)
+        => Path.Combine(GetAgentsRootDirectory(), $"agent-{index}");
+
+    /// <summary>
+    /// Optional <c>.env</c> file in the copilotd home directory used for provider settings.
+    /// </summary>
+    public static string GetEnvFilePath()
+        => Path.Combine(GetCopilotdHomeDirectory(), ".env");
 }

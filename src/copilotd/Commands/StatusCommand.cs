@@ -40,6 +40,7 @@ public static class StatusCommand
                 var daemonRunning = stateStore.IsLockHeld();
                 var daemonInfo = daemonRunning ? stateStore.ReadDaemonPid() : null;
                 var recoveredStaleControlSession = false;
+                var recoveredStaleAgents = false;
                 var controlLiveness = ProcessLivenessResult.Dead;
                 var state = stateStore.WithStateLock(() =>
                 {
@@ -63,6 +64,32 @@ public static class StatusCommand
                         }
                         else if (currentState.ControlSession.ProcessId != previousProcessId
                                  || currentState.ControlSession.ProcessStartTime != previousProcessStartTime)
+                        {
+                            stateStore.SaveState(currentState);
+                        }
+                    }
+
+                    foreach (var agent in currentState.Agents)
+                    {
+                        if (agent.Status != ControlSessionStatus.Running)
+                            continue;
+
+                        var previousProcessId = agent.ProcessId;
+                        var previousProcessStartTime = agent.ProcessStartTime;
+                        var agentLiveness = processManager.CheckAgentSession(agent);
+                        if (agentLiveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused)
+                        {
+                            agent.Status = ControlSessionStatus.Stopped;
+                            agent.ProcessId = null;
+                            agent.ProcessStartTime = null;
+                            agent.RootProcessId = null;
+                            agent.RootProcessStartTime = null;
+                            agent.UpdatedAt = DateTimeOffset.UtcNow;
+                            stateStore.SaveState(currentState);
+                            recoveredStaleAgents = true;
+                        }
+                        else if (agent.ProcessId != previousProcessId
+                                 || agent.ProcessStartTime != previousProcessStartTime)
                         {
                             stateStore.SaveState(currentState);
                         }
@@ -97,6 +124,7 @@ public static class StatusCommand
                     ConsoleOutput.Info($"  Logs:      {logFileManager.GetDaemonLogDirectoryForDisplay(daemonLogInstanceId)}");
                 ConsoleOutput.Info($"  Machine:   {Environment.MachineName}");
                 ConsoleOutput.Info($"  Machine ID:{(stateStore.GetMachineIdentifier() is { Length: > 0 } machineIdentifier ? $" {machineIdentifier}" : " (not assigned)")}");
+                ConsoleOutput.Info($"  Provider:  {CopilotProviderEnvironment.Describe(config)}");
 
                 // Control session status
                 if (state.ControlSession is not null)
@@ -126,6 +154,45 @@ public static class StatusCommand
                 else if (config.EnableControlSession)
                 {
                     AnsiConsole.MarkupLine("  Control:   [grey]○ Not started[/]");
+                }
+
+                if (config.EnableAgents && config.AgentCount > 0)
+                {
+                    if (recoveredStaleAgents)
+                        ConsoleOutput.Warning("Recovered stale agent session(s) -> Stopped");
+
+                    var desiredAgents = Math.Clamp(config.AgentCount, CopilotdConfig.MinAgentCount, CopilotdConfig.MaxAgentCount);
+                    var trackedAgents = state.Agents.OrderBy(agent => agent.Index).ToList();
+                    var runningAgents = trackedAgents.Count(agent => agent.Status == ControlSessionStatus.Running);
+                    AnsiConsole.MarkupLine($"  Agents:    {runningAgents}/{desiredAgents} running");
+
+                    foreach (var agent in trackedAgents)
+                    {
+                        var agentStatus = agent.Status switch
+                        {
+                            ControlSessionStatus.Running => "[green]● Running[/]",
+                            ControlSessionStatus.Starting => "[yellow]◐ Starting[/]",
+                            ControlSessionStatus.Failed => "[red]✕ Failed[/]",
+                            _ => "[grey]○ Stopped[/]",
+                        };
+                        var agentPid = agent.ProcessId is { } agentPidValue ? $" (PID {agentPidValue})" : "";
+                        AnsiConsole.MarkupLine(
+                            $"    Agent {agent.Index}: {agentStatus}{Markup.Escape(agentPid)} {Markup.Escape(agent.CopilotSessionName ?? "(unnamed)")}");
+
+                        if (agent.Status == ControlSessionStatus.Running)
+                        {
+                            var agentUrl = remoteSessionUrls.TryResolve(agent, config.CurrentUser)
+                                ?? "remote URL unavailable";
+                            ConsoleOutput.Info($"      {agentUrl}");
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(agent.LastError))
+                            ConsoleOutput.Info($"      {agent.LastError}");
+                    }
+                }
+                else
+                {
+                    AnsiConsole.MarkupLine("  Agents:    [grey]○ Disabled[/]");
                 }
 
                 Console.WriteLine();

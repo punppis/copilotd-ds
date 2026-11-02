@@ -79,6 +79,41 @@ public sealed class CopilotdConfig
     public bool EnableControlSession { get; set; } = true;
 
     /// <summary>
+    /// Whether to keep a pool of always-on remote agent sessions running. Agents are launched
+    /// with <c>copilot --remote</c>, named per host, restarted when they exit, and are
+    /// independent of issue/PR dispatch. Default is true.
+    /// </summary>
+    public bool EnableAgents { get; set; } = true;
+
+    /// <summary>
+    /// Number of always-on agent sessions to keep running. Clamped to
+    /// <see cref="MinAgentCount"/>..<see cref="MaxAgentCount"/>. Default is 3.
+    /// </summary>
+    public int AgentCount { get; set; } = DefaultAgentCount;
+
+    /// <summary>
+    /// Format string for always-on agent session names. Supports the same
+    /// <c>$(token)</c> replacement style as prompts: <c>$(agent_index)</c>,
+    /// <c>$(agent_count)</c>, <c>$(host)</c> (stable copilotd machine identifier),
+    /// and <c>$(machine_name)</c>. Default is <c>(copilotd agent $(agent_index)) $(host)</c>.
+    /// </summary>
+    public string AgentNameFormat { get; set; } = DefaultAgentNameFormat;
+
+    /// <summary>
+    /// Default model for always-on agents and dispatched sessions when
+    /// <see cref="DefaultModel"/> is not set and DeepSeek BYOK is not active.
+    /// Points at the GitHub-hosted DeepSeek catalog model by default.
+    /// </summary>
+    public string AgentModel { get; set; } = DefaultAgentModel;
+
+    /// <summary>
+    /// BYOK provider settings applied to every Copilot CLI process launched by copilotd.
+    /// Defaults to DeepSeek's Anthropic-compatible endpoint and activates automatically
+    /// when an API key is configured or found in the environment or a <c>.env</c> file.
+    /// </summary>
+    public CopilotProviderConfig Provider { get; set; } = new();
+
+    /// <summary>
     /// Whether to post emoji reactions on issues/PRs to indicate session lifecycle status
     /// (👀 queued, 🚀 working, 👍 completed, 👎 failed). Default is true.
     /// Can be overridden per-rule via <see cref="IssueDispatchRule.EnableReactions"/>.
@@ -138,6 +173,17 @@ public sealed class CopilotdConfig
 
     public const string DefaultSessionNameFormat = "(copilotd) $(org)/$(repo)#$(issue_id)";
 
+    public const int DefaultAgentCount = 3;
+    public const int MinAgentCount = 0;
+    public const int MaxAgentCount = 16;
+
+    /// <summary>
+    /// GitHub-hosted DeepSeek catalog model used when BYOK is inactive.
+    /// </summary>
+    public const string DefaultAgentModel = "Kitka-Games/DeepSeek/deepseek-flash";
+
+    public const string DefaultAgentNameFormat = "(copilotd agent $(agent_index)) $(host)";
+
     public const string IssueFeedbackPrompt =
         """
         You are resuming work on issue #$(issue.id) in the $(issue.repo) repository because new comments were posted on the issue.
@@ -189,6 +235,80 @@ public sealed class CopilotdConfig
         - If a session is stuck or failed, suggest `copilotd session reset <issue>` to retry it
         - Issue keys use the format "org/repo#number"
         """;
+
+    public const string AgentSessionPrompt =
+        """
+        You are copilotd agent $(agent_index) of $(agent_count) on host $(machine_name) (machine $(host)).
+        You are one of the always-on remote agents that copilotd keeps ready for monitoring and
+        management. You are NOT the dispatch session for a specific issue or pull request.
+
+        AVAILABLE COMMANDS (run these in the terminal):
+        - `$(copilotd.command) status`                          — Show daemon health, agents, and session summary
+        - `$(copilotd.command) session list [--all]`             — List active sessions
+        - `$(copilotd.command) session info <issue>`             — Show details for a tracked session
+        - `$(copilotd.command) session reset <issue>`            — Reset a session for re-dispatch
+        - `$(copilotd.command) session complete <issue>`         — Mark a session as completed
+        - `$(copilotd.command) session comment <issue> --message "text"` — Post a comment and pause the session
+        - `$(copilotd.command) rules list`                       — Show configured dispatch rules
+        - `$(copilotd.command) config`                           — Show current configuration
+
+        FORBIDDEN COMMANDS (do NOT run these — they would disrupt the daemon):
+        - `$(copilotd.command) run` / `$(copilotd.command) start` / `$(copilotd.command) stop`
+        - `$(copilotd.command) update`
+        - `$(copilotd.command) init`
+        - `$(copilotd.command) shutdown-instance`
+
+        GUIDELINES:
+        - Start by running `$(copilotd.command) status` when the user asks about the daemon.
+        - Inspect state with read-only commands before suggesting changes.
+        - Do not modify repositories, run destructive git commands, or post to issues unless the user asks.
+        - Keep responses concise and include session keys in "org/repo#number" form.
+        """;
+}
+
+/// <summary>
+/// BYOK provider settings passed to Copilot CLI through environment variables.
+/// When an API key is resolved, copilotd launches Copilot with
+/// <c>COPILOT_PROVIDER_*</c> overrides and uses <see cref="Model"/> instead of the
+/// GitHub-hosted catalog model.
+/// </summary>
+public sealed class CopilotProviderConfig
+{
+    public const string DefaultType = "anthropic";
+    public const string DefaultBaseUrl = "https://api.deepseek.com/anthropic";
+    public const string DefaultModel = "deepseek-v4-flash";
+    public const string DefaultApiKeyEnvironmentVariable = "DEEPSEEK_API_KEY";
+    public const int DefaultMaxPromptTokens = 840_000;
+    public const int DefaultMaxOutputTokens = 128_000;
+
+    /// <summary>Whether BYOK may activate when an API key is available. Default is true.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Provider type: "anthropic", "openai", or "azure". Default is "anthropic".</summary>
+    public string Type { get; set; } = DefaultType;
+
+    /// <summary>Provider base URL. Default is DeepSeek's Anthropic-compatible endpoint.</summary>
+    public string BaseUrl { get; set; } = DefaultBaseUrl;
+
+    /// <summary>Model name sent to the provider. Default is "deepseek-v4-flash".</summary>
+    public string Model { get; set; } = DefaultModel;
+
+    /// <summary>
+    /// API key. Prefer the environment or a <c>.env</c> file over storing secrets in config.json.
+    /// </summary>
+    public string? ApiKey { get; set; }
+
+    /// <summary>
+    /// Environment variable consulted for the API key in addition to
+    /// <c>COPILOT_PROVIDER_API_KEY</c>. Default is <c>DEEPSEEK_API_KEY</c>.
+    /// </summary>
+    public string ApiKeyEnvironmentVariable { get; set; } = DefaultApiKeyEnvironmentVariable;
+
+    /// <summary>Maximum prompt tokens reported to Copilot CLI. Null disables the override.</summary>
+    public int? MaxPromptTokens { get; set; } = DefaultMaxPromptTokens;
+
+    /// <summary>Maximum output tokens reported to Copilot CLI. Null disables the override.</summary>
+    public int? MaxOutputTokens { get; set; } = DefaultMaxOutputTokens;
 }
 
 /// <summary>

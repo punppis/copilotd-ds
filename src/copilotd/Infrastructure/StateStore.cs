@@ -57,23 +57,30 @@ public sealed class StateStore
 
     public CopilotdConfig LoadConfig()
     {
+        CopilotdConfig config;
+
         if (!File.Exists(_configPath))
         {
             _logger.LogDebug("No config file found, returning defaults");
-            return new CopilotdConfig();
+            config = new CopilotdConfig();
+        }
+        else
+        {
+            try
+            {
+                var json = File.ReadAllText(_configPath);
+                config = JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.CopilotdConfig)
+                         ?? new CopilotdConfig();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Config file is corrupt or unreadable, returning defaults");
+                config = new CopilotdConfig();
+            }
         }
 
-        try
-        {
-            var json = File.ReadAllText(_configPath);
-            return JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.CopilotdConfig)
-                   ?? new CopilotdConfig();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Config file is corrupt or unreadable, returning defaults");
-            return new CopilotdConfig();
-        }
+        CopilotdEnvironment.ApplyConfigOverrides(config);
+        return config;
     }
 
     public void SaveConfig(CopilotdConfig config)

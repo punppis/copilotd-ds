@@ -49,6 +49,12 @@ public sealed class CopilotTrustService
     public IReadOnlyList<string> GetRequiredTrustedFoldersForControlSession()
         => [NormalizePath(CopilotdPaths.GetControlSessionDirectory())];
 
+    /// <summary>
+    /// Trusting the agents root covers every per-agent working directory beneath it.
+    /// </summary>
+    public IReadOnlyList<string> GetRequiredTrustedFoldersForAgents()
+        => [NormalizePath(CopilotdPaths.GetAgentsRootDirectory())];
+
     public IReadOnlyList<string> GetRequiredTrustedFolders(string repoPath)
     {
         var normalizedRepoPath = NormalizePath(repoPath);

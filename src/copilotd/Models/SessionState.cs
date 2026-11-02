@@ -31,6 +31,13 @@ public sealed class DaemonState
     /// dispatch sessions to avoid interference with reconciliation and pruning.
     /// </summary>
     public ControlSessionInfo? ControlSession { get; set; }
+
+    /// <summary>
+    /// Always-on remote agent sessions, keyed by their 1-based slot index.
+    /// Tracked separately from dispatch sessions so reconciliation and pruning
+    /// never terminate agents that are merely idle.
+    /// </summary>
+    public List<AgentSessionInfo> Agents { get; set; } = [];
 }
 
 /// <summary>
@@ -469,4 +476,47 @@ public sealed class ControlSessionInfo
 
     /// <summary>When the control session status was last updated.</summary>
     public DateTimeOffset? UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// Tracks one always-on remote agent session. Agents reuse the control session
+/// lifecycle states and are kept running by the agent pool supervisor.
+/// </summary>
+public sealed class AgentSessionInfo
+{
+    /// <summary>1-based slot index used for naming and stable state tracking.</summary>
+    public int Index { get; set; }
+
+    /// <summary>Copilot session ID when known.</summary>
+    public string? CopilotSessionId { get; set; }
+
+    /// <summary>Human-readable session name shown in the remote sessions UI.</summary>
+    public string? CopilotSessionName { get; set; }
+
+    /// <summary>Agent-specific working directory.</summary>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>OS process ID of the copilot process.</summary>
+    public int? ProcessId { get; set; }
+
+    /// <summary>Process start time, used alongside PID to detect PID reuse.</summary>
+    public DateTimeOffset? ProcessStartTime { get; set; }
+
+    /// <summary>Windows bootstrap process created directly by copilotd.</summary>
+    public int? RootProcessId { get; set; }
+
+    /// <summary>Start time for <see cref="RootProcessId"/>, used to detect PID reuse.</summary>
+    public DateTimeOffset? RootProcessStartTime { get; set; }
+
+    /// <summary>Current lifecycle status. Reuses control session states.</summary>
+    public ControlSessionStatus Status { get; set; } = ControlSessionStatus.Stopped;
+
+    /// <summary>When the agent session was last started.</summary>
+    public DateTimeOffset? StartedAt { get; set; }
+
+    /// <summary>When the agent session status was last updated.</summary>
+    public DateTimeOffset? UpdatedAt { get; set; }
+
+    /// <summary>Last launch failure detail, cleared on a successful launch.</summary>
+    public string? LastError { get; set; }
 }

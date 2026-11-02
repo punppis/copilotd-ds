@@ -29,6 +29,20 @@ internal static class CopilotTrustCommandHelper
             }
         }
 
+        if (config.EnableAgents && config.AgentCount > 0)
+        {
+            var agentsRootDirectory = CopilotdPaths.GetAgentsRootDirectory();
+            try
+            {
+                Directory.CreateDirectory(agentsRootDirectory);
+                requiredFolders.AddRange(trustService.GetRequiredTrustedFoldersForAgents());
+            }
+            catch (Exception ex)
+            {
+                ConsoleOutput.Warning($"Could not create agents folder '{agentsRootDirectory}': {ex.Message}");
+            }
+        }
+
         requiredFolders.AddRange(repoSlugs
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(repoSlug => repoResolver.ResolveRepoPath(repoSlug, config, state))

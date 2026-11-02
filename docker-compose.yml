@@ -1,0 +1,58 @@
+name: copilotd
+
+services:
+  copilotd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: copilotd:local
+    restart: unless-stopped
+
+    # DEEPSEEK_API_KEY and other provider settings can live in .env. When the key
+    # is present, copilotd automatically uses the direct DeepSeek API; otherwise
+    # it uses the GitHub-hosted Kitka-Games/DeepSeek/deepseek-flash model.
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      COPILOTD_HOME: /data/copilotd
+      COPILOTD_REPO_HOME: /repos
+      COPILOTD_ENABLE_AGENTS: ${COPILOTD_ENABLE_AGENTS:-true}
+      COPILOTD_AGENT_COUNT: ${COPILOTD_AGENT_COUNT:-3}
+      COPILOTD_ENABLE_CONTROL_SESSION: ${COPILOTD_ENABLE_CONTROL_SESSION:-true}
+      # GitHub CLI token: set GH_TOKEN in .env as an alternative to mounting
+      # ~/.config/gh. Required for issue/PR dispatch; Copilot itself can be
+      # authenticated via the mounted ~/.copilot directory.
+
+    volumes:
+      # Host folder that contains your cloned repositories (copilotd repo_home).
+      # Mount the whole root: copilotd creates <repo>_sessions worktrees beside
+      # each checkout.
+      - ${COPILOTD_HOST_REPO_HOME:-./repos}:/repos
+
+      # Persisted copilotd config, state, logs, and agent identity.
+      - copilotd-data:/data/copilotd
+
+      # Copilot CLI auth, logs, and session state. Set COPILOT_HOME_DIR to the
+      # host's ~/.copilot so `copilot --remote` sessions can authenticate.
+      - ${COPILOT_HOME_DIR:-./.copilot}:/home/copilotd/.copilot
+
+      # GitHub CLI auth (read-only). Ignored when GH_TOKEN is set.
+      - ${GH_CONFIG_DIR:-./.gh}:/home/copilotd/.config/gh:ro
+
+      # Keep the machine identifier stable so agent names stay stable across
+      # container recreations.
+      - copilotd-home:/home/copilotd
+
+    # The image defaults to the non-root copilotd user (UID 1000) to match the
+    # common Linux host UID and keep the mounted ~/.copilot writable. If your
+    # host UID differs, uncomment this and make sure /data/copilotd and the
+    # mounted repo root are writable by that UID.
+    # user: "${UID:-1000}:${GID:-1000}"
+
+    stop_grace_period: 60s
+
+volumes:
+  copilotd-data:
+  copilotd-home:

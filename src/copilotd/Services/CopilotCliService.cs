@@ -14,6 +14,12 @@ public sealed class CopilotCliService
     private static readonly Regex VersionTokenPattern = new(
         @"\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    /// <summary>
+    /// First CLI version that retired the <c>--remote</c> startup flag in favor of
+    /// the <c>remoteSessions</c> user setting.
+    /// </summary>
+    private static readonly Version MinimumRemoteSettingsVersion = new(1, 0, 103);
+
     private readonly ILogger<CopilotCliService> _logger;
 
     public CopilotCliService(ILogger<CopilotCliService> logger)
@@ -81,6 +87,28 @@ public sealed class CopilotCliService
         }
 
         return VersionHelper.TryParse(match.Value, out version);
+    }
+
+    /// <summary>
+    /// Returns true when the installed CLI still supports the legacy <c>--remote</c>
+    /// startup flag (versions before 1.0.103). Newer CLIs enable remote control via
+    /// the <c>remoteSessions</c> setting instead.
+    /// </summary>
+    public bool SupportsLegacyRemoteFlag()
+    {
+        if (!TryGetSemanticVersion(out var version, out var versionDisplay))
+        {
+            _logger.LogWarning(
+                "Could not determine the copilot CLI version; assuming the legacy --remote flag is unsupported");
+            return false;
+        }
+
+        var usesLegacyFlag = version.Version < MinimumRemoteSettingsVersion;
+        _logger.LogDebug(
+            "copilot CLI {Version} enables remote sessions via {Mechanism}",
+            versionDisplay,
+            usesLegacyFlag ? "--remote" : $"the {CopilotSettingsService.RemoteSessionsSetting} setting");
+        return usesLegacyFlag;
     }
 
     /// <summary>

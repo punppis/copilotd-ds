@@ -345,6 +345,8 @@ public sealed class TolerantPullRequestBranchStrategyConverter : JsonConverter<P
 [JsonSerializable(typeof(PullRequestDispatchRule))]
 [JsonSerializable(typeof(DispatchSession))]
 [JsonSerializable(typeof(ControlSessionInfo))]
+[JsonSerializable(typeof(AgentSessionInfo))]
+[JsonSerializable(typeof(CopilotProviderConfig))]
 [JsonSerializable(typeof(GitHubIssue))]
 [JsonSerializable(typeof(List<GitHubIssue>))]
 [JsonSerializable(typeof(GitHubPullRequest))]
