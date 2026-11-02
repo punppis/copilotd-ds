@@ -250,6 +250,20 @@ public static class StopCommand
                     }
                 }
 
+                foreach (var agent in state.Agents.Where(agent => agent.Status == Models.ControlSessionStatus.Running))
+                {
+                    logger.LogInformation("Stop command cleaning up tracked agent {Index} after daemon exit", agent.Index);
+                    if (processManager.TerminateAgentSession(agent))
+                    {
+                        agent.Status = Models.ControlSessionStatus.Stopped;
+                        agent.ProcessId = null;
+                        agent.ProcessStartTime = null;
+                        agent.RootProcessId = null;
+                        agent.RootProcessStartTime = null;
+                        agent.UpdatedAt = DateTimeOffset.UtcNow;
+                    }
+                }
+
                 foreach (var session in state.Sessions.Values.Where(session => session.Status == Models.SessionStatus.Running))
                 {
                     logger.LogInformation("Stop command cleaning up tracked session {IssueKey} after daemon exit", session.IssueKey);

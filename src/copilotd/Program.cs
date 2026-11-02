@@ -87,6 +87,7 @@ public class Program
         serviceCollection.AddSingleton<GhCliService>();
         serviceCollection.AddSingleton<CopilotCliService>();
         serviceCollection.AddSingleton<ReconciliationEngine>();
+        serviceCollection.AddSingleton<AgentPoolSupervisor>();
         serviceCollection.AddSingleton<GitHubReleaseService>();
         serviceCollection.AddSingleton<ProvenanceVerifier>();
         serviceCollection.AddSingleton<RuntimeContext>();

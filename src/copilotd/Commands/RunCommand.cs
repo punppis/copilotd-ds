@@ -43,6 +43,7 @@ public static class RunCommand
                 var logFileManager = services.GetRequiredService<LogFileManager>();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
                 var copilotTrust = services.GetRequiredService<CopilotTrustService>();
+                var agentSupervisor = services.GetRequiredService<AgentPoolSupervisor>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
@@ -213,6 +214,38 @@ public static class RunCommand
                         }
                     }
 
+                    // Launch/refresh the always-on agent pool
+                    AgentPoolReconcileResult? agentResult = null;
+                    stateStore.WithStateLock(() =>
+                    {
+                        var state = stateStore.LoadState();
+                        agentResult = agentSupervisor.Reconcile(
+                            config,
+                            state,
+                            stateStore.EnsureMachineIdentifier(daemonCancellationToken));
+                        stateStore.SaveState(state);
+                    }, daemonCancellationToken);
+
+                    if (agentResult is not null)
+                    {
+                        if (!config.EnableAgents || agentResult.DesiredCount == 0)
+                        {
+                            ConsoleOutput.Info("Always-on agents are disabled.");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Info(
+                                $"Agents: {agentResult.RunningCount}/{agentResult.DesiredCount} running" +
+                                (agentResult.Launched.Count > 0 ? $", {agentResult.Launched.Count} launched" : "") +
+                                (agentResult.Failed.Count > 0 ? $", {agentResult.Failed.Count} failed" : ""));
+                            await WriteAgentRemoteUrlsAsync(
+                                agentResult.Launched,
+                                remoteSessionUrls,
+                                config.CurrentUser,
+                                ct);
+                        }
+                    }
+
                     // Main poll loop. The command action token is already wired to System.CommandLine's
                     // Ctrl+C handling, so observe it directly instead of waiting on a separate CTS.
                     var shutdownRequested = 0;
@@ -255,6 +288,7 @@ public static class RunCommand
                                 stateStore.WithStateLock(() =>
                                 {
                                     var state = stateStore.LoadState();
+                                    var machineIdentifier = stateStore.EnsureMachineIdentifier(daemonCancellationToken);
 
                                     reconciliation.Reconcile(config, state);
 
@@ -303,28 +337,28 @@ public static class RunCommand
                                                     };
                                                     stateStore.SaveState(state);
                                                 }
-
-                                                return;
-                                            }
-
-                                            logger.LogInformation("Relaunching control session...");
-                                            var controlSession = processManager.LaunchControlSession(config, stateStore.EnsureMachineIdentifier(daemonCancellationToken));
-                                            if (controlSession is not null)
-                                            {
-                                                state.ControlSession = controlSession;
-                                                logger.LogInformation("Control session relaunched (PID {Pid})", controlSession.ProcessId);
                                             }
                                             else
                                             {
-                                                state.ControlSession = new ControlSessionInfo
+                                                logger.LogInformation("Relaunching control session...");
+                                                var controlSession = processManager.LaunchControlSession(config, machineIdentifier);
+                                                if (controlSession is not null)
                                                 {
-                                                    Status = ControlSessionStatus.Failed,
-                                                    UpdatedAt = DateTimeOffset.UtcNow,
-                                                };
-                                                logger.LogWarning("Failed to relaunch control session");
-                                            }
+                                                    state.ControlSession = controlSession;
+                                                    logger.LogInformation("Control session relaunched (PID {Pid})", controlSession.ProcessId);
+                                                }
+                                                else
+                                                {
+                                                    state.ControlSession = new ControlSessionInfo
+                                                    {
+                                                        Status = ControlSessionStatus.Failed,
+                                                        UpdatedAt = DateTimeOffset.UtcNow,
+                                                    };
+                                                    logger.LogWarning("Failed to relaunch control session");
+                                                }
 
-                                            stateStore.SaveState(state);
+                                                stateStore.SaveState(state);
+                                            }
                                         }
                                     }
                                     else if (state.ControlSession is not null
@@ -340,6 +374,20 @@ public static class RunCommand
                                         state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                                         stateStore.SaveState(state);
                                     }
+
+                                    var agentResult = agentSupervisor.Reconcile(config, state, machineIdentifier);
+                                    if (agentResult.HasChanges)
+                                    {
+                                        logger.LogInformation(
+                                            "Agent pool: {Running}/{Desired} running, {Launched} launched, {Failed} failed, {Stopped} stopped",
+                                            agentResult.RunningCount,
+                                            agentResult.DesiredCount,
+                                            agentResult.Launched.Count,
+                                            agentResult.Failed.Count,
+                                            agentResult.StoppedCount);
+                                    }
+
+                                    stateStore.SaveState(state);
                                 }, daemonCancellationToken);
 
                                 if (!disableSelfUpdates)
@@ -439,6 +487,54 @@ public static class RunCommand
         ConsoleOutput.Info($"  {url ?? "unavailable"}");
     }
 
+    private static async Task WriteAgentRemoteUrlsAsync(
+        IReadOnlyList<AgentSessionInfo> agents,
+        GitHubRemoteSessionUrlResolver remoteSessionUrls,
+        string? currentUser,
+        CancellationToken ct)
+    {
+        if (agents.Count == 0)
+            return;
+
+        var urls = new string?[agents.Count];
+        var deadline = DateTimeOffset.UtcNow + RemoteUrlResolveTimeout;
+
+        while (true)
+        {
+            var unresolved = false;
+            for (var index = 0; index < agents.Count; index++)
+            {
+                if (urls[index] is not null)
+                    continue;
+
+                urls[index] = remoteSessionUrls.TryResolve(agents[index], currentUser);
+                if (urls[index] is null)
+                    unresolved = true;
+            }
+
+            if (!unresolved || DateTimeOffset.UtcNow >= deadline || ct.IsCancellationRequested)
+                break;
+
+            try
+            {
+                await Task.Delay(RemoteUrlResolvePollInterval, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+
+        for (var index = 0; index < agents.Count; index++)
+        {
+            var agent = agents[index];
+            var label = string.IsNullOrWhiteSpace(agent.CopilotSessionName)
+                ? $"Agent {agent.Index}"
+                : agent.CopilotSessionName;
+            ConsoleOutput.Info($"{label}: {urls[index] ?? "remote URL unavailable"}");
+        }
+    }
+
     private static (bool CanLaunch, bool WarningShown) CheckControlSessionTrust(
         CopilotTrustService copilotTrust,
         ILogger logger,
@@ -525,6 +621,33 @@ public static class RunCommand
                 }
             }
 
+            var runningAgents = state.Agents
+                .Where(agent => agent.Status == ControlSessionStatus.Running)
+                .ToList();
+            if (runningAgents.Count > 0)
+            {
+                ConsoleOutput.Info($"Shutting down {runningAgents.Count} always-on agent session(s)...");
+                Parallel.ForEach(runningAgents, agent =>
+                {
+                    if (processManager.TerminateAgentSession(agent))
+                    {
+                        lock (agent)
+                        {
+                            agent.Status = ControlSessionStatus.Stopped;
+                            agent.ProcessId = null;
+                            agent.ProcessStartTime = null;
+                            agent.RootProcessId = null;
+                            agent.RootProcessStartTime = null;
+                            agent.UpdatedAt = DateTimeOffset.UtcNow;
+                        }
+                    }
+                    else
+                    {
+                        logger.LogWarning("Failed to terminate agent {Index} during daemon shutdown; leaving tracked state intact", agent.Index);
+                    }
+                });
+            }
+
             var runningSessions = state.Sessions.Values
                 .Where(s => s.Status == SessionStatus.Running)
                 .ToList();
@@ -586,6 +709,31 @@ public static class RunCommand
                 else
                 {
                     logger.LogWarning("Failed to schedule control session termination during process exit; leaving tracked state intact");
+                }
+            }
+
+            foreach (var agent in state.Agents.Where(agent => agent.Status == ControlSessionStatus.Running))
+            {
+                logger.LogWarning("Process exit detected before normal shutdown cleanup completed; scheduling termination for agent {Index}", agent.Index);
+                if (processManager.ScheduleTerminateCopilotProcess(
+                    $"agent {agent.Index}",
+                    agent.ProcessId,
+                    agent.ProcessStartTime,
+                    agent.RootProcessId,
+                    agent.RootProcessStartTime,
+                    TimeSpan.Zero))
+                {
+                    agent.Status = ControlSessionStatus.Stopped;
+                    agent.ProcessId = null;
+                    agent.ProcessStartTime = null;
+                    agent.RootProcessId = null;
+                    agent.RootProcessStartTime = null;
+                    agent.UpdatedAt = DateTimeOffset.UtcNow;
+                    stateChanged = true;
+                }
+                else
+                {
+                    logger.LogWarning("Failed to schedule termination for agent {Index} during process exit; leaving tracked state intact", agent.Index);
                 }
             }
 

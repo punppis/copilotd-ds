@@ -126,9 +126,22 @@ public static class InitCommand
                         .Validate(v => v > 0 ? ValidationResult.Success() : ValidationResult.Error("Must be a positive integer")));
                 AnsiConsole.WriteLine();
 
+                // Always-on agents
+                AnsiConsole.MarkupLine("[grey]Number of always-on remote agent sessions copilotd keeps ready (0 disables).[/]");
+                AnsiConsole.MarkupLine($"[grey]Agents are named per host and restarted automatically. Maximum is {CopilotdConfig.MaxAgentCount}.[/]");
+                config.AgentCount = AnsiConsole.Prompt(
+                    new TextPrompt<int>("Always-on remote agents:")
+                        .DefaultValue(config.AgentCount)
+                        .Validate(v => v >= CopilotdConfig.MinAgentCount && v <= CopilotdConfig.MaxAgentCount
+                            ? ValidationResult.Success()
+                            : ValidationResult.Error($"Must be between {CopilotdConfig.MinAgentCount} and {CopilotdConfig.MaxAgentCount}")));
+                config.EnableAgents = config.AgentCount > 0;
+                AnsiConsole.WriteLine();
+
                 // Default model
-                AnsiConsole.MarkupLine("[grey]Optional default model for all sessions (e.g., claude-sonnet-4, o4-mini).[/]");
-                AnsiConsole.MarkupLine("[grey]Leave empty to use the copilot CLI default. Can be overridden per rule.[/]");
+                AnsiConsole.MarkupLine($"[grey]Optional default model for all sessions. Leave empty to use {CopilotdConfig.DefaultAgentModel}[/]");
+                AnsiConsole.MarkupLine("[grey]from the GitHub catalog, or the direct DeepSeek model when DEEPSEEK_API_KEY is in .env.[/]");
+                AnsiConsole.MarkupLine("[grey]Can be overridden per rule.[/]");
                 var modelInput = AnsiConsole.Prompt(
                     new TextPrompt<string>("Default model:")
                         .DefaultValue(config.DefaultModel ?? "")
@@ -561,7 +574,10 @@ public static class InitCommand
 
                 summaryTable.AddRow("[blue]Repo home[/]", Markup.Escape(config.RepoHome));
                 summaryTable.AddRow("[blue]Max concurrent sessions[/]", Markup.Escape(config.MaxInstances.ToString()));
-                summaryTable.AddRow("[blue]Default model[/]", Markup.Escape(config.DefaultModel ?? "(copilot default)"));
+                summaryTable.AddRow("[blue]Always-on agents[/]", Markup.Escape(config.EnableAgents ? config.AgentCount.ToString() : "disabled"));
+                summaryTable.AddRow("[blue]Agent name format[/]", Markup.Escape(config.AgentNameFormat));
+                summaryTable.AddRow("[blue]Default model[/]", Markup.Escape(config.DefaultModel ?? "(automatic DeepSeek selection)"));
+                summaryTable.AddRow("[blue]Provider[/]", Markup.Escape(CopilotProviderEnvironment.Describe(config)));
                 summaryTable.AddRow("", "");
                 if (defaultIssueRule is not null)
                 {
@@ -611,6 +627,7 @@ public static class InitCommand
                 AddNextStep(nextStepsTable, "copilotd rules add MyRule --kind issue --label bug --yolo", "Create a new issue dispatch rule");
                 AddNextStep(nextStepsTable, "copilotd rules add MyPrRule --kind pr --label review", "Create a new PR dispatch rule");
                 AddNextStep(nextStepsTable, "copilotd config --set max_instances=5", "Change concurrency limit");
+                AddNextStep(nextStepsTable, "copilotd config --set agent_count=3", "Change the always-on agent count");
                 AddNextStep(nextStepsTable, "copilotd config --set default_model=claude-sonnet-4", "Set the default model");
                 AddNextStep(nextStepsTable, "copilotd status", "Check daemon health and sessions");
                 AnsiConsole.Write(nextStepsTable);

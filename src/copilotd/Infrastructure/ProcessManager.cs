@@ -39,6 +39,7 @@ public sealed partial class ProcessManager
     private readonly RuntimeContext _runtimeContext;
     private readonly CopilotCliService _copilotCli;
     private readonly ILogger<ProcessManager> _logger;
+    private bool _providerFallbackWarningLogged;
 
     public ProcessManager(
         StateStore stateStore,
@@ -109,13 +110,18 @@ public sealed partial class ProcessManager
             extraAllowedDirectories.Add(snapshotDirectory);
         }
 
+        var provider = CopilotProviderEnvironment.Resolve(config);
+        var effectiveDefaultModel = CopilotProviderEnvironment.ResolveModel(config, provider);
+        var effectiveModel = ruleOptions?.Model ?? effectiveDefaultModel;
+        LogProviderFallbackWarning(config, provider);
+
         var args = BuildArguments(
             session,
             prompt,
             sessionName,
             ruleOptions,
             repoPath,
-            config.DefaultModel,
+            effectiveDefaultModel,
             extraAllowedDirectories);
 
         _logger.LogInformation(
@@ -123,6 +129,8 @@ public sealed partial class ProcessManager
             session.IssueKey,
             session.CopilotSessionName ?? session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
+
+        var launchEnvironment = BuildLaunchEnvironment(provider, effectiveModel);
 
         try
         {
@@ -140,7 +148,7 @@ public sealed partial class ProcessManager
 
                 var cmdLine = $"copilot {args}";
                 var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
-                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(BrowserLaunchSuppressionEnvironment);
+                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(launchEnvironment);
 
                 try
                 {
@@ -208,7 +216,7 @@ public sealed partial class ProcessManager
                     RedirectStandardInput = false,
                     CreateNoWindow = true,
                 };
-                ApplyBrowserLaunchSuppressionEnvironment(psi);
+                ApplyEnvironmentOverrides(psi, launchEnvironment);
 
                 process = Process.Start(psi);
                 if (process is null)
@@ -766,6 +774,10 @@ public sealed partial class ProcessManager
             return null;
         }
 
+        var provider = CopilotProviderEnvironment.Resolve(config);
+        var model = CopilotProviderEnvironment.ResolveModel(config, provider);
+        LogProviderFallbackWarning(config, provider);
+
         var session = new ControlSessionInfo
         {
             CopilotSessionId = Guid.NewGuid().ToString("D"),
@@ -776,100 +788,118 @@ public sealed partial class ProcessManager
         };
 
         var prompt = ExpandCopilotdCommand(CopilotdConfig.ControlSessionPrompt, _runtimeContext.GetCopilotdCallbackCommand());
-        var args = BuildControlSessionArguments(session, prompt, config.DefaultModel, _runtimeContext);
+        var args = BuildControlSessionArguments(session, prompt, model, _runtimeContext);
         _logger.LogInformation("Launching control session {SessionName}", session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
 
-        try
+        var launched = LaunchRemoteCopilotProcess(
+            "control session",
+            args,
+            workingDir,
+            BuildLaunchEnvironment(provider, model));
+        if (launched is null)
+            return null;
+
+        session.ProcessId = launched.ProcessId;
+        session.ProcessStartTime = launched.ProcessStartTime;
+        session.RootProcessId = launched.RootProcessId;
+        session.RootProcessStartTime = launched.RootProcessStartTime;
+        session.Status = ControlSessionStatus.Running;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        _logger.LogInformation("Control session launched: PID={Pid}", session.ProcessId);
+        return session;
+    }
+
+    /// <summary>
+    /// Launches one always-on remote agent session. Agents are named per host and
+    /// restarted by the agent pool supervisor when they exit.
+    /// </summary>
+    public AgentSessionInfo? LaunchAgentSession(CopilotdConfig config, string machineIdentifier, int index, int agentCount)
+    {
+        var workingDir = EnsureAgentSessionWorkingDirectory(index);
+        if (workingDir is null)
         {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>() };
-                si.dwFlags = STARTF_USESHOWWINDOW;
-                si.wShowWindow = SW_HIDE;
-
-                var cmdLine = $"copilot {args}";
-                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
-
-                if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
-                    flags, IntPtr.Zero, workingDir, ref si, out var pi))
-                {
-                    _logger.LogError("CreateProcessW failed for control session (error: {Error})",
-                        Marshal.GetLastWin32Error());
-                    return null;
-                }
-
-                try
-                {
-                    var rootStartTime = GetProcessStartTime(pi.hProcess);
-                    if (rootStartTime is null)
-                    {
-                        _logger.LogError(
-                            "Could not capture the Windows bootstrap process identity for the control session; terminating PID {Pid}",
-                            pi.dwProcessId);
-                        TerminateProcessHandle(pi.hProcess, 1);
-                        return null;
-                    }
-
-                    var root = new TrackedProcessIdentity(
-                        pi.dwProcessId,
-                        rootStartTime.Value);
-                    InitializeTrackedWindowsCopilotProcess(
-                        "control session",
-                        root,
-                        trackedRoot =>
-                        {
-                            session.RootProcessId = trackedRoot.ProcessId;
-                            session.RootProcessStartTime = trackedRoot.ProcessStartTime;
-                        },
-                        active =>
-                        {
-                            session.ProcessId = active.ProcessId;
-                            session.ProcessStartTime = active.ProcessStartTime;
-                        });
-                }
-                finally
-                {
-                    CloseHandle(pi.hProcess);
-                    CloseHandle(pi.hThread);
-                }
-            }
-            else
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "copilot",
-                    Arguments = args,
-                    WorkingDirectory = workingDir,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = false,
-                    RedirectStandardError = false,
-                    RedirectStandardInput = false,
-                    CreateNoWindow = true,
-                };
-
-                var process = Process.Start(psi);
-                if (process is null)
-                {
-                    _logger.LogError("Failed to start copilot process for control session");
-                    return null;
-                }
-
-                session.ProcessId = process.Id;
-                session.ProcessStartTime = GetProcessStartTime(process);
-                process.Dispose();
-            }
-
-            session.Status = ControlSessionStatus.Running;
-            session.UpdatedAt = DateTimeOffset.UtcNow;
-            _logger.LogInformation("Control session launched: PID={Pid}", session.ProcessId);
-            return session;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Exception launching control session");
+            _logger.LogError("Cannot launch agent {Index}: failed to set up working directory", index);
             return null;
         }
+
+        var provider = CopilotProviderEnvironment.Resolve(config);
+        var model = CopilotProviderEnvironment.ResolveModel(config, provider);
+        LogProviderFallbackWarning(config, provider);
+
+        var session = new AgentSessionInfo
+        {
+            Index = index,
+            CopilotSessionId = Guid.NewGuid().ToString("D"),
+            CopilotSessionName = BuildAgentSessionName(config, machineIdentifier, index, agentCount),
+            WorkingDirectory = workingDir,
+            Status = ControlSessionStatus.Starting,
+            StartedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+
+        var prompt = BuildAgentPrompt(machineIdentifier, index, agentCount);
+        var args = BuildAgentSessionArguments(session, prompt, model, _runtimeContext);
+        _logger.LogInformation("Launching agent {Index} ({SessionName})", index, session.CopilotSessionName);
+        _logger.LogDebug("copilot {Args}", args);
+
+        var launched = LaunchRemoteCopilotProcess(
+            $"agent {index}",
+            args,
+            workingDir,
+            BuildLaunchEnvironment(provider, model));
+        if (launched is null)
+        {
+            session.Status = ControlSessionStatus.Failed;
+            session.LastError = "Failed to start the copilot agent process.";
+            session.UpdatedAt = DateTimeOffset.UtcNow;
+            return session;
+        }
+
+        session.ProcessId = launched.ProcessId;
+        session.ProcessStartTime = launched.ProcessStartTime;
+        session.RootProcessId = launched.RootProcessId;
+        session.RootProcessStartTime = launched.RootProcessStartTime;
+        session.Status = ControlSessionStatus.Running;
+        session.LastError = null;
+        session.UpdatedAt = DateTimeOffset.UtcNow;
+        _logger.LogInformation("Agent {Index} launched: PID={Pid}", index, session.ProcessId);
+        return session;
+    }
+
+    /// <summary>
+    /// Checks whether the tracked agent process is still alive.
+    /// </summary>
+    public ProcessLivenessResult CheckAgentSession(AgentSessionInfo session)
+        => CheckCopilotProcessTree(
+            $"agent {session.Index}",
+            session.ProcessId,
+            session.ProcessStartTime,
+            session.RootProcessId,
+            session.RootProcessStartTime,
+            active =>
+            {
+                session.ProcessId = active.ProcessId;
+                session.ProcessStartTime = active.ProcessStartTime;
+            });
+
+    /// <summary>
+    /// Gracefully terminates an agent session process.
+    /// </summary>
+    public bool TerminateAgentSession(AgentSessionInfo session)
+    {
+        if (OperatingSystem.IsWindows() && session.RootProcessId is { } rootPid)
+        {
+            var fallbackPid = session.ProcessId != rootPid ? session.ProcessId : null;
+            return TerminateViaShutdownInstance(
+                $"agent {session.Index}",
+                rootPid,
+                session.RootProcessStartTime,
+                fallbackPid,
+                fallbackPid.HasValue ? session.ProcessStartTime : null);
+        }
+
+        return TerminateProcess($"agent {session.Index}", session.ProcessId, session.ProcessStartTime);
     }
 
     /// <summary>
@@ -945,6 +975,232 @@ public sealed partial class ProcessManager
         catch (Exception ex)
         {
             _logger.LogError(ex, "Exception creating control session working directory at {Path}", workingDir);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Builds the always-on agent name from <see cref="CopilotdConfig.AgentNameFormat"/>.
+    /// The default includes the stable copilotd machine identifier so agents from
+    /// different hosts are distinguishable in the remote sessions UI.
+    /// </summary>
+    public static string BuildAgentSessionName(CopilotdConfig config, string machineIdentifier, int index, int agentCount)
+    {
+        var format = string.IsNullOrWhiteSpace(config.AgentNameFormat)
+            ? CopilotdConfig.DefaultAgentNameFormat
+            : config.AgentNameFormat;
+
+        var name = TemplateExpander.Expand(format, token =>
+        {
+            if (token.SequenceEqual("agent_index"))
+                return index.ToString();
+            if (token.SequenceEqual("agent_count"))
+                return agentCount.ToString();
+            if (token.SequenceEqual("host"))
+                return machineIdentifier;
+            if (token.SequenceEqual("machine_id") || token.SequenceEqual("machine_identifier"))
+                return machineIdentifier;
+            if (token.SequenceEqual("machine_name"))
+                return Environment.MachineName;
+            return null;
+        }).Trim();
+
+        return string.IsNullOrWhiteSpace(name)
+            ? $"(copilotd agent {index}) {machineIdentifier}"
+            : name;
+    }
+
+    private static string BuildAgentSessionArguments(AgentSessionInfo session, string prompt, string? model, RuntimeContext runtimeContext)
+    {
+        var args = new List<string>
+        {
+            "--remote",
+        };
+
+        if (!string.IsNullOrWhiteSpace(session.CopilotSessionName))
+        {
+            args.Add("--name");
+            args.Add($"\"{EscapeArg(session.CopilotSessionName)}\"");
+        }
+        else if (!string.IsNullOrWhiteSpace(session.CopilotSessionId))
+        {
+            args.Add($"--resume=\"{EscapeArg(session.CopilotSessionId)}\"");
+        }
+
+        args.Add("-i");
+        args.Add($"\"{EscapeArg(prompt)}\"");
+
+        // Agents are monitoring/management sessions: grant only the daemon, gh, and git CLI surface.
+        foreach (var command in runtimeContext.GetControlSessionAllowedShellCommands().Distinct(StringComparer.OrdinalIgnoreCase))
+            args.Add($"--allow-tool=shell({command}:*)");
+
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            args.Add("--model");
+            args.Add($"\"{EscapeArg(model)}\"");
+        }
+
+        foreach (var extraDir in runtimeContext.GetExtraAllowedDirectories().Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            args.Add("--add-dir");
+            args.Add($"\"{EscapeArg(extraDir)}\"");
+        }
+
+        return string.Join(' ', args);
+    }
+
+    private string BuildAgentPrompt(string machineIdentifier, int index, int agentCount)
+    {
+        var template = ExpandCopilotdCommand(
+            CopilotdConfig.AgentSessionPrompt,
+            _runtimeContext.GetCopilotdCallbackCommand());
+
+        return TemplateExpander.Expand(template, token =>
+        {
+            if (token.SequenceEqual("agent_index"))
+                return index.ToString();
+            if (token.SequenceEqual("agent_count"))
+                return agentCount.ToString();
+            if (token.SequenceEqual("host") || token.SequenceEqual("machine_id") || token.SequenceEqual("machine_identifier"))
+                return machineIdentifier;
+            if (token.SequenceEqual("machine_name"))
+                return Environment.MachineName;
+            return null;
+        });
+    }
+
+    private string? EnsureAgentSessionWorkingDirectory(int index)
+    {
+        var workingDir = CopilotdPaths.GetAgentSessionDirectory(index);
+
+        try
+        {
+            Directory.CreateDirectory(workingDir);
+            return workingDir;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception creating agent {Index} working directory at {Path}", index, workingDir);
+            return null;
+        }
+    }
+
+    private sealed record LaunchedCopilotProcess(
+        int? ProcessId,
+        DateTimeOffset? ProcessStartTime,
+        int? RootProcessId,
+        DateTimeOffset? RootProcessStartTime);
+
+    /// <summary>
+    /// Launches a detached remote Copilot process with the supplied environment overrides
+    /// and returns its tracked identity. Used by control and always-on agent sessions.
+    /// </summary>
+    private LaunchedCopilotProcess? LaunchRemoteCopilotProcess(
+        string processLabel,
+        string arguments,
+        string workingDirectory,
+        IReadOnlyList<KeyValuePair<string, string>> environmentOverrides)
+    {
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>() };
+                si.dwFlags = STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_HIDE;
+
+                var cmdLine = $"copilot {arguments}";
+                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_UNICODE_ENVIRONMENT;
+                var environmentBlock = BuildWindowsEnvironmentBlockWithOverrides(environmentOverrides);
+
+                try
+                {
+                    if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
+                        flags, environmentBlock, workingDirectory, ref si, out var pi))
+                    {
+                        _logger.LogError("CreateProcessW failed for {ProcessLabel} (error: {Error})",
+                            processLabel, Marshal.GetLastWin32Error());
+                        return null;
+                    }
+
+                    try
+                    {
+                        var rootStartTime = GetProcessStartTime(pi.hProcess);
+                        if (rootStartTime is null)
+                        {
+                            _logger.LogError(
+                                "Could not capture the Windows bootstrap process identity for {ProcessLabel}; terminating PID {Pid}",
+                                processLabel,
+                                pi.dwProcessId);
+                            TerminateProcessHandle(pi.hProcess, 1);
+                            return null;
+                        }
+
+                        var root = new TrackedProcessIdentity(pi.dwProcessId, rootStartTime.Value);
+                        var resolvedRoot = root;
+                        int? activePid = null;
+                        DateTimeOffset? activeStartTime = null;
+
+                        InitializeTrackedWindowsCopilotProcess(
+                            processLabel,
+                            root,
+                            trackedRoot => resolvedRoot = trackedRoot,
+                            active =>
+                            {
+                                activePid = active.ProcessId;
+                                activeStartTime = active.ProcessStartTime;
+                            });
+
+                        return new LaunchedCopilotProcess(
+                            activePid,
+                            activeStartTime,
+                            resolvedRoot.ProcessId,
+                            resolvedRoot.ProcessStartTime);
+                    }
+                    finally
+                    {
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(environmentBlock);
+                }
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "copilot",
+                Arguments = arguments,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
+                RedirectStandardInput = false,
+                CreateNoWindow = true,
+            };
+
+            ApplyEnvironmentOverrides(psi, environmentOverrides);
+
+            var process = Process.Start(psi);
+            if (process is null)
+            {
+                _logger.LogError("Failed to start copilot process for {ProcessLabel}", processLabel);
+                return null;
+            }
+
+            var launched = new LaunchedCopilotProcess(
+                process.Id,
+                GetProcessStartTime(process),
+                null,
+                null);
+            process.Dispose();
+            return launched;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception launching copilot process for {ProcessLabel}", processLabel);
             return null;
         }
     }
@@ -1328,10 +1584,30 @@ public sealed partial class ProcessManager
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 
-    private static void ApplyBrowserLaunchSuppressionEnvironment(ProcessStartInfo psi)
+    private static void ApplyEnvironmentOverrides(ProcessStartInfo psi, IEnumerable<KeyValuePair<string, string>> overrides)
     {
-        foreach (var (name, value) in BrowserLaunchSuppressionEnvironment)
+        foreach (var (name, value) in overrides)
             psi.Environment[name] = value;
+    }
+
+    private static IReadOnlyList<KeyValuePair<string, string>> BuildLaunchEnvironment(
+        ResolvedCopilotProvider provider,
+        string? model)
+    {
+        var overrides = new List<KeyValuePair<string, string>>(BrowserLaunchSuppressionEnvironment);
+        overrides.AddRange(CopilotProviderEnvironment.BuildOverrides(provider, model));
+        return overrides;
+    }
+
+    private void LogProviderFallbackWarning(CopilotdConfig config, ResolvedCopilotProvider provider)
+    {
+        if (!config.Provider.Enabled || provider.IsActive || _providerFallbackWarningLogged)
+            return;
+
+        _providerFallbackWarningLogged = true;
+        _logger.LogWarning(
+            "DeepSeek BYOK is enabled but no API key was found. Set DEEPSEEK_API_KEY in a .env file (or provider.api_key) to use the direct DeepSeek API; using {Model} from the GitHub catalog.",
+            CopilotProviderEnvironment.ResolveModel(config));
     }
 
     private static IntPtr BuildWindowsEnvironmentBlockWithOverrides(IEnumerable<KeyValuePair<string, string>> overrides)

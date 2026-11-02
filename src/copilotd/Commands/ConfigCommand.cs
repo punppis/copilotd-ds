@@ -44,6 +44,18 @@ public static class ConfigCommand
                     table.AddRow("session_name_format", Markup.Escape(string.IsNullOrWhiteSpace(config.SessionNameFormat) ? "(disabled)" : config.SessionNameFormat));
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("enable_control_session", Markup.Escape(config.EnableControlSession.ToString().ToLowerInvariant()));
+                    table.AddRow("enable_agents", Markup.Escape(config.EnableAgents.ToString().ToLowerInvariant()));
+                    table.AddRow("agent_count", Markup.Escape(config.AgentCount.ToString()));
+                    table.AddRow("agent_name_format", Markup.Escape(config.AgentNameFormat));
+                    table.AddRow("agent_model", Markup.Escape(config.AgentModel));
+                    table.AddRow("provider_enabled", Markup.Escape(config.Provider.Enabled.ToString().ToLowerInvariant()));
+                    table.AddRow("provider_type", Markup.Escape(config.Provider.Type));
+                    table.AddRow("provider_base_url", Markup.Escape(config.Provider.BaseUrl));
+                    table.AddRow("provider_model", Markup.Escape(config.Provider.Model));
+                    table.AddRow("provider_api_key", Markup.Escape(string.IsNullOrWhiteSpace(config.Provider.ApiKey) ? "(not set)" : "(configured)"));
+                    table.AddRow("provider_api_key_env", Markup.Escape(config.Provider.ApiKeyEnvironmentVariable));
+                    table.AddRow("provider_max_prompt_tokens", Markup.Escape(config.Provider.MaxPromptTokens?.ToString() ?? "(copilot default)"));
+                    table.AddRow("provider_max_output_tokens", Markup.Escape(config.Provider.MaxOutputTokens?.ToString() ?? "(copilot default)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
                     table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
                     table.AddRow("issue_rules", Markup.Escape($"{config.IssueRules.Count} rule(s)"));
@@ -199,6 +211,141 @@ public static class ConfigCommand
                         }
                         break;
 
+                    case "enable_agents":
+                        if (TryParseBoolean(value, out var enableAgents))
+                        {
+                            cfg.EnableAgents = enableAgents;
+                            if (cfg.EnableAgents && cfg.AgentCount > 0)
+                            {
+                                CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                                    copilotTrust,
+                                    repoResolver,
+                                    copilotCli,
+                                    cfg,
+                                    stateStore.LoadState(),
+                                    cfg.IssueRules.Values.Cast<DispatchRuleOptions>()
+                                        .Concat(cfg.PullRequestRules.Values)
+                                        .SelectMany(dispatchRule => dispatchRule.Repos)
+                                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                                        .ToList());
+                            }
+                            ConsoleOutput.Success($"enable_agents set to: {cfg.EnableAgents.ToString().ToLowerInvariant()}");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("enable_agents must be true or false");
+                            return 1;
+                        }
+                        break;
+
+                    case "agent_count":
+                    case "agents":
+                        if (int.TryParse(value, out var agentCount)
+                            && agentCount >= CopilotdConfig.MinAgentCount
+                            && agentCount <= CopilotdConfig.MaxAgentCount)
+                        {
+                            cfg.AgentCount = agentCount;
+                            ConsoleOutput.Success($"agent_count set to: {agentCount}");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error($"agent_count must be an integer between {CopilotdConfig.MinAgentCount} and {CopilotdConfig.MaxAgentCount}");
+                            return 1;
+                        }
+                        break;
+
+                    case "agent_name_format":
+                        cfg.AgentNameFormat = string.IsNullOrWhiteSpace(value)
+                            ? CopilotdConfig.DefaultAgentNameFormat
+                            : value;
+                        ConsoleOutput.Success($"agent_name_format set to: {cfg.AgentNameFormat}");
+                        break;
+
+                    case "agent_model":
+                        cfg.AgentModel = string.IsNullOrWhiteSpace(value)
+                            ? CopilotdConfig.DefaultAgentModel
+                            : value;
+                        ConsoleOutput.Success($"agent_model set to: {cfg.AgentModel}");
+                        break;
+
+                    case "provider_enabled":
+                        if (TryParseBoolean(value, out var providerEnabled))
+                        {
+                            cfg.Provider.Enabled = providerEnabled;
+                            ConsoleOutput.Success($"provider_enabled set to: {cfg.Provider.Enabled.ToString().ToLowerInvariant()}");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("provider_enabled must be true or false");
+                            return 1;
+                        }
+                        break;
+
+                    case "provider_type":
+                        cfg.Provider.Type = string.IsNullOrWhiteSpace(value)
+                            ? CopilotProviderConfig.DefaultType
+                            : value;
+                        ConsoleOutput.Success($"provider_type set to: {cfg.Provider.Type}");
+                        break;
+
+                    case "provider_base_url":
+                        cfg.Provider.BaseUrl = string.IsNullOrWhiteSpace(value)
+                            ? CopilotProviderConfig.DefaultBaseUrl
+                            : value;
+                        ConsoleOutput.Success($"provider_base_url set to: {cfg.Provider.BaseUrl}");
+                        break;
+
+                    case "provider_model":
+                        cfg.Provider.Model = string.IsNullOrWhiteSpace(value)
+                            ? CopilotProviderConfig.DefaultModel
+                            : value;
+                        ConsoleOutput.Success($"provider_model set to: {cfg.Provider.Model}");
+                        break;
+
+                    case "provider_api_key":
+                        cfg.Provider.ApiKey = string.IsNullOrWhiteSpace(value) ? null : value;
+                        ConsoleOutput.Success(cfg.Provider.ApiKey is not null
+                            ? "provider_api_key updated (prefer DEEPSEEK_API_KEY in .env to avoid storing secrets in config.json)."
+                            : "provider_api_key cleared.");
+                        break;
+
+                    case "provider_api_key_env":
+                        cfg.Provider.ApiKeyEnvironmentVariable = string.IsNullOrWhiteSpace(value)
+                            ? CopilotProviderConfig.DefaultApiKeyEnvironmentVariable
+                            : value;
+                        ConsoleOutput.Success($"provider_api_key_env set to: {cfg.Provider.ApiKeyEnvironmentVariable}");
+                        break;
+
+                    case "provider_max_prompt_tokens":
+                        if (TryParseOptionalPositiveInt(value, out var maxPromptTokens))
+                        {
+                            cfg.Provider.MaxPromptTokens = maxPromptTokens;
+                            ConsoleOutput.Success(cfg.Provider.MaxPromptTokens is { } promptTokens
+                                ? $"provider_max_prompt_tokens set to: {promptTokens}"
+                                : "provider_max_prompt_tokens cleared.");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("provider_max_prompt_tokens must be a positive integer or empty");
+                            return 1;
+                        }
+                        break;
+
+                    case "provider_max_output_tokens":
+                        if (TryParseOptionalPositiveInt(value, out var maxOutputTokens))
+                        {
+                            cfg.Provider.MaxOutputTokens = maxOutputTokens;
+                            ConsoleOutput.Success(cfg.Provider.MaxOutputTokens is { } outputTokens
+                                ? $"provider_max_output_tokens set to: {outputTokens}"
+                                : "provider_max_output_tokens cleared.");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("provider_max_output_tokens must be a positive integer or empty");
+                            return 1;
+                        }
+                        break;
+
                     case "max_instances":
                         if (int.TryParse(value, out var maxInst) && maxInst > 0)
                         {
@@ -228,7 +375,7 @@ public static class ConfigCommand
 
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, current_user, enable_control_session, max_instances, session_shutdown_delay_seconds");
+                        ConsoleOutput.Info("Valid keys: repo_home, default_model, custom_prompt, session_name_format, current_user, enable_control_session, enable_agents, agent_count, agent_name_format, agent_model, provider_enabled, provider_type, provider_base_url, provider_model, provider_api_key, provider_api_key_env, provider_max_prompt_tokens, provider_max_output_tokens, max_instances, session_shutdown_delay_seconds");
                         return 1;
                 }
 
@@ -262,6 +409,24 @@ public static class ConfigCommand
         }
 
         result = false;
+        return false;
+    }
+
+    private static bool TryParseOptionalPositiveInt(string value, out int? result)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            result = null;
+            return true;
+        }
+
+        if (int.TryParse(value, out var parsed) && parsed > 0)
+        {
+            result = parsed;
+            return true;
+        }
+
+        result = null;
         return false;
     }
 }

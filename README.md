@@ -25,7 +25,10 @@ Available for Windows, macOS, and Linux.
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive connection** — connect to any running remote-enabled session with `copilotd session connect` without stopping the orchestrated session (requires Copilot CLI 1.0.32+)
 - **Remote control session** — hosts a `copilot --remote` session for remotely managing copilotd via the GitHub remote sessions UI (web & mobile)
-- **Cross-platform** — works on Windows, macOS, and Linux
+- **Always-on remote agents** — keeps `agent_count` (default 3) independent `copilot --remote` sessions running, named per host, automatically restarted, and listed in `copilotd status`
+- **DeepSeek by default** — uses the GitHub-hosted `Kitka-Games/DeepSeek/deepseek-flash` model, and automatically switches to direct DeepSeek BYOK when `DEEPSEEK_API_KEY` is available in `.env`
+- **Docker-ready** — multi-stage image and compose file that mount your host repo root, Copilot auth, and persistent state
+- **Cross-platform** — works on Windows, macOS, Linux, and containers
 
 ## Getting started
 
@@ -33,6 +36,8 @@ Available for Windows, macOS, and Linux.
 
 - [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated via `gh auth login`
 - [Copilot CLI (`copilot`)](https://docs.github.com/copilot/how-tos/copilot-cli) — authenticated via `copilot login`
+- Optional: a DeepSeek API key in `.env` to use the direct DeepSeek API. Without one, copilotd
+  uses the GitHub-hosted `Kitka-Games/DeepSeek/deepseek-flash` model.
 
 ### Install on Windows
 
@@ -122,7 +127,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd session pr <pr-number> <issue>` | Associate a PR with a session and wait for review feedback (callable from within a copilot session) |
 | `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
-| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `session_name_format`, `current_user`, `enable_control_session`, `max_instances`, `session_shutdown_delay_seconds`) |
+| `copilotd config --set key=value` | Set a config value (`repo_home`, `default_model`, `custom_prompt`, `session_name_format`, `current_user`, `enable_control_session`, `enable_agents`, `agent_count`, `agent_name_format`, `agent_model`, `provider_enabled`, `provider_type`, `provider_base_url`, `provider_model`, `provider_api_key`, `provider_max_prompt_tokens`, `provider_max_output_tokens`, `max_instances`, `session_shutdown_delay_seconds`) |
 | `copilotd rules list` | List all dispatch rules (`copilotd rule list` also works) |
 | `copilotd rules add <name>` | Add a new issue dispatch rule (`copilotd rule create <name>` and `copilotd rule new <name>` also work); use `--kind pr` for pull request rules |
 | `copilotd rules update <name>` | Update an existing rule (`copilotd rule edit <name>` also works) |
@@ -427,6 +432,82 @@ sessions, and more — all via natural language.
 
 To disable the control session, run `copilotd config --set enable_control_session=false`, or set `enable_control_session` to `false` in `~/.copilotd/config.json` (or `COPILOTD_HOME\config.json` when `COPILOTD_HOME` is set).
 
+### Always-on agents
+
+copilotd keeps a pool of independent, always-on `copilot --remote` agents ready for monitoring
+and management alongside the control session. They are **not** used for issue/PR dispatch.
+
+- `agent_count` (default `3`, valid range `0`–`16`) controls the pool size; `enable_agents` toggles it.
+- Each agent runs from its own folder under `~/.copilotd/agents/agent-N`.
+- Names come from `agent_name_format`, default
+  `(copilotd agent $(agent_index)) $(host)`. `$(host)` is the stable copilotd machine identifier,
+  so agents from different hosts are distinguishable in the remote sessions UI. `$(machine_name)`,
+  `$(agent_count)`, `$(machine_id)`, and `$(machine_identifier)` are also available.
+- If an agent process exits, it is relaunched on the next poll cycle. Decreasing `agent_count`
+  stops the surplus agents.
+- Agents do not count against `max_instances`; shell access is restricted to `copilotd`, `gh`,
+  and `git` commands.
+- `copilotd status` lists each agent with its PID and GitHub remote session URL.
+
+Disable the pool with `copilotd config --set enable_agents=false` or `copilotd config --set agent_count=0`.
+
+### Models and DeepSeek
+
+copilotd uses DeepSeek by default. Two modes are supported, selected automatically:
+
+1. **GitHub-hosted catalog (default)** — sessions use
+   `Kitka-Games/DeepSeek/deepseek-flash` through your existing Copilot authentication.
+   Change it with `copilotd config --set agent_model=<model>`.
+2. **Direct DeepSeek API (BYOK)** — when an API key is available, copilotd launches Copilot with
+   `COPILOT_PROVIDER_TYPE=anthropic`,
+   `COPILOT_PROVIDER_BASE_URL=https://api.deepseek.com/anthropic`,
+   `COPILOT_PROVIDER_API_KEY`, and `COPILOT_MODEL`, following the
+   [DeepSeek Copilot CLI guide](https://github.com/deepseek-ai/awesome-deepseek-agent/blob/main/docs/copilot_cli.md).
+   Direct mode uses `provider_model` (default `deepseek-v4-flash`; set `deepseek-v4-pro` for the
+   larger model) and the documented token limits.
+
+Provide the key through any of these, in precedence order:
+
+1. `COPILOT_PROVIDER_API_KEY` in the process environment
+2. `DEEPSEEK_API_KEY` in the process environment
+3. `COPILOT_PROVIDER_API_KEY` or `DEEPSEEK_API_KEY` in a `.env` file
+4. `provider_api_key` in `config.json`
+
+`.env` files are read from `COPILOTD_ENV_FILE` (when set), the current directory, and
+`~/.copilotd/.env`, in that order. When no key is found, copilotd logs one warning and keeps
+using the GitHub catalog model.
+
+Model precedence is: rule-level `model` → explicit `default_model` → active BYOK `provider_model`
+→ `agent_model` (GitHub catalog).
+
+### Docker
+
+The image bundles the copilotd daemon, Node.js 22, the Copilot CLI, `gh`, and `git`.
+The compose file mounts your **host repo root**, Copilot auth, and persistent state:
+
+```bash
+cp .env.example .env                              # optional: set DEEPSEEK_API_KEY
+export COPILOTD_HOST_REPO_HOME="$HOME/repos"      # folder containing org/repo checkouts
+export COPILOT_HOME_DIR="$HOME/.copilot"          # Copilot CLI auth, logs, session state
+export GH_CONFIG_DIR="$HOME/.config/gh"           # or set GH_TOKEN instead
+docker compose run --rm copilotd init             # interactive first-run setup
+docker compose up -d --build
+docker compose exec copilotd copilotd status
+```
+
+Notes:
+
+- Mount the **whole repo root**, not a single repository. copilotd creates worktrees in
+  `<repo>_sessions` folders beside each checkout.
+- `copilotd-data` persists `/data/copilotd` (config, state, logs). `copilotd-home` persists the
+  machine identifier so agent names stay stable across container recreations.
+- On Linux, uncomment `user: "${UID:-1000}:${GID:-1000}"` in `docker-compose.yml` if
+  bind-mounted files should be owned by your host user.
+- `dumb-init` forwards SIGTERM so the daemon gracefully stops agents, dispatch sessions, and the
+  control session before the container exits.
+- The container disables self-updates (`COPILOTD_DISABLE_SELF_UPDATES=1`); rebuild the image to
+  update copilotd or the Copilot CLI.
+
 ### Terminal states and pruning
 
 - **Completed** and **Failed** are terminal states
@@ -444,6 +525,9 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 - `state.json` — runtime session tracking (auto-managed, self-healing)
 - `update-state.json` — self-update staging and install coordination
 - `prompt.md` — optional global custom prompt text appended to the built-in prompt
+- `.env` — optional provider secrets and environment overrides (never commit it)
+- `control-session\` — working directory for the remote control session
+- `agents\agent-N\` — working directories for always-on remote agents
 - `logs\` — rolling file logs for copilotd commands, with daemon instances isolated under `logs\daemon_<uuid>\`
 - `.lock` — single-instance guard (present while daemon is running)
 - `<local app data>\copilotd\machine.id` — stable machine identifier stored outside `COPILOTD_HOME` so it survives state resets
@@ -460,6 +544,43 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 | `session_shutdown_delay_seconds` | `15` | Delay before shutting down an orchestrated session after `session comment`, `session pr`, or `session complete` |
 | `max_redispatches` | `10` | Maximum re-dispatches per session via comment/review feedback loops before requiring manual reset |
 | `enable_control_session` | `true` | Launch a control remote session when the daemon starts for remote management via the GitHub remote sessions UI |
+| `enable_agents` | `true` | Keep the always-on remote agent pool running |
+| `agent_count` | `3` | Number of independent always-on `copilot --remote` agents (0–16) |
+| `agent_name_format` | `(copilotd agent $(agent_index)) $(host)` | Agent session name template. Supports `$(agent_index)`, `$(agent_count)`, `$(host)`, `$(machine_name)` |
+| `agent_model` | `Kitka-Games/DeepSeek/deepseek-flash` | Default model when neither `default_model` nor BYOK is active |
+| `provider_enabled` | `true` | Allow BYOK activation when an API key is found |
+| `provider_type` | `anthropic` | BYOK provider type (`anthropic`, `openai`, or `azure`) |
+| `provider_base_url` | `https://api.deepseek.com/anthropic` | BYOK endpoint |
+| `provider_model` | `deepseek-v4-flash` | Model sent to the BYOK provider (`deepseek-v4-pro` also available) |
+| `provider_api_key` | *(none)* | API key; prefer `DEEPSEEK_API_KEY` in `.env` |
+| `provider_api_key_env` | `DEEPSEEK_API_KEY` | Additional environment variable consulted for the key |
+| `provider_max_prompt_tokens` | `840000` | BYOK prompt token limit |
+| `provider_max_output_tokens` | `128000` | BYOK output token limit |
+
+### Environment overrides
+
+Environment variables take precedence over `config.json`, which makes the Docker image and
+container orchestration configurable without editing persisted config:
+
+| Variable | Description |
+|----------|-------------|
+| `COPILOTD_HOME` | State/config directory (default `~/.copilotd`) |
+| `COPILOTD_ENV_FILE` | Explicit `.env` file path for provider settings |
+| `COPILOTD_REPO_HOME` | Repo root, overrides `repo_home` |
+| `COPILOTD_ENABLE_AGENTS` | `true`/`false` agent pool toggle |
+| `COPILOTD_AGENT_COUNT` | Agent pool size |
+| `COPILOTD_AGENT_NAME_FORMAT` | Agent name template |
+| `COPILOTD_AGENT_MODEL` | Catalog model used when BYOK is inactive |
+| `COPILOTD_ENABLE_CONTROL_SESSION` | `true`/`false` control session toggle |
+| `COPILOTD_DEFAULT_MODEL` | Explicit default model override |
+| `COPILOTD_PROVIDER_ENABLED` | `true`/`false` BYOK toggle |
+| `COPILOTD_PROVIDER_TYPE` | BYOK provider type |
+| `COPILOTD_PROVIDER_BASE_URL` | BYOK endpoint |
+| `COPILOTD_PROVIDER_MODEL` | BYOK model |
+| `COPILOTD_PROVIDER_API_KEY` | BYOK API key |
+| `COPILOTD_PROVIDER_API_KEY_ENV` | Extra environment variable name to consult for the key |
+| `DEEPSEEK_API_KEY` | Direct DeepSeek API key (activates BYOK) |
+| `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BASE_URL`, `COPILOT_PROVIDER_TYPE`, `COPILOT_MODEL` | Standard Copilot CLI BYOK variables; honored directly |
 
 ### Rule settings
 
