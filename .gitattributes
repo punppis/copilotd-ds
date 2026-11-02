@@ -1,0 +1,3 @@
+# Docker build context requires LF line endings for shell entrypoints.
+*.sh text eol=lf
+Dockerfile text eol=lf
