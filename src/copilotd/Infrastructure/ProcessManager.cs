@@ -38,6 +38,7 @@ public sealed partial class ProcessManager
     private readonly RepoPathResolver _repoResolver;
     private readonly RuntimeContext _runtimeContext;
     private readonly CopilotCliService _copilotCli;
+    private readonly CopilotSettingsService _copilotSettings;
     private readonly ILogger<ProcessManager> _logger;
     private bool _providerFallbackWarningLogged;
 
@@ -46,12 +47,14 @@ public sealed partial class ProcessManager
         RepoPathResolver repoResolver,
         RuntimeContext runtimeContext,
         CopilotCliService copilotCli,
+        CopilotSettingsService copilotSettings,
         ILogger<ProcessManager> logger)
     {
         _stateStore = stateStore;
         _repoResolver = repoResolver;
         _runtimeContext = runtimeContext;
         _copilotCli = copilotCli;
+        _copilotSettings = copilotSettings;
         _logger = logger;
     }
 
@@ -115,6 +118,8 @@ public sealed partial class ProcessManager
         var effectiveModel = ruleOptions?.Model ?? effectiveDefaultModel;
         LogProviderFallbackWarning(config, provider);
 
+        var useLegacyRemoteFlag = PrepareRemoteSessions();
+
         var args = BuildArguments(
             session,
             prompt,
@@ -122,7 +127,8 @@ public sealed partial class ProcessManager
             ruleOptions,
             repoPath,
             effectiveDefaultModel,
-            extraAllowedDirectories);
+            extraAllowedDirectories,
+            useLegacyRemoteFlag);
 
         _logger.LogInformation(
             "Launching copilot for {IssueKey} with session {SessionId}",
@@ -788,7 +794,8 @@ public sealed partial class ProcessManager
         };
 
         var prompt = ExpandCopilotdCommand(CopilotdConfig.ControlSessionPrompt, _runtimeContext.GetCopilotdCallbackCommand());
-        var args = BuildControlSessionArguments(session, prompt, model, _runtimeContext);
+        var useLegacyRemoteFlag = PrepareRemoteSessions();
+        var args = BuildControlSessionArguments(session, prompt, model, _runtimeContext, useLegacyRemoteFlag);
         _logger.LogInformation("Launching control session {SessionName}", session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
 
@@ -839,7 +846,8 @@ public sealed partial class ProcessManager
         };
 
         var prompt = BuildAgentPrompt(machineIdentifier, index, agentCount);
-        var args = BuildAgentSessionArguments(session, prompt, model, _runtimeContext);
+        var useLegacyRemoteFlag = PrepareRemoteSessions();
+        var args = BuildAgentSessionArguments(session, prompt, model, _runtimeContext, useLegacyRemoteFlag);
         _logger.LogInformation("Launching agent {Index} ({SessionName})", index, session.CopilotSessionName);
         _logger.LogDebug("copilot {Args}", args);
 
@@ -921,12 +929,16 @@ public sealed partial class ProcessManager
         return TerminateProcess("control session", session.ProcessId, session.ProcessStartTime);
     }
 
-    private static string BuildControlSessionArguments(ControlSessionInfo session, string prompt, string? defaultModel, RuntimeContext runtimeContext)
+    private static string BuildControlSessionArguments(
+        ControlSessionInfo session,
+        string prompt,
+        string? defaultModel,
+        RuntimeContext runtimeContext,
+        bool useLegacyRemoteFlag)
     {
-        var args = new List<string>
-        {
-            "--remote",
-        };
+        var args = new List<string>();
+        if (useLegacyRemoteFlag)
+            args.Add("--remote");
 
         if (!string.IsNullOrWhiteSpace(session.CopilotSessionName))
         {
@@ -1010,12 +1022,16 @@ public sealed partial class ProcessManager
             : name;
     }
 
-    private static string BuildAgentSessionArguments(AgentSessionInfo session, string prompt, string? model, RuntimeContext runtimeContext)
+    private static string BuildAgentSessionArguments(
+        AgentSessionInfo session,
+        string prompt,
+        string? model,
+        RuntimeContext runtimeContext,
+        bool useLegacyRemoteFlag)
     {
-        var args = new List<string>
-        {
-            "--remote",
-        };
+        var args = new List<string>();
+        if (useLegacyRemoteFlag)
+            args.Add("--remote");
 
         if (!string.IsNullOrWhiteSpace(session.CopilotSessionName))
         {
@@ -1497,12 +1513,19 @@ public sealed partial class ProcessManager
         return (repoSlug[..separatorIndex], repoSlug[(separatorIndex + 1)..]);
     }
 
-    private static string BuildArguments(DispatchSession session, string prompt, string? sessionName, DispatchRuleOptions? rule, string repoPath, string? defaultModel, IEnumerable<string> extraAllowedDirectories)
+    private static string BuildArguments(
+        DispatchSession session,
+        string prompt,
+        string? sessionName,
+        DispatchRuleOptions? rule,
+        string repoPath,
+        string? defaultModel,
+        IEnumerable<string> extraAllowedDirectories,
+        bool useLegacyRemoteFlag)
     {
-        var args = new List<string>
-        {
-            "--remote",
-        };
+        var args = new List<string>();
+        if (useLegacyRemoteFlag)
+            args.Add("--remote");
 
         string? resumeTarget = null;
         if (HasExistingResumeContext(session))
@@ -1608,6 +1631,20 @@ public sealed partial class ProcessManager
         _logger.LogWarning(
             "DeepSeek BYOK is enabled but no API key was found. Set DEEPSEEK_API_KEY in a .env file (or provider.api_key) to use the direct DeepSeek API; using {Model} from the GitHub catalog.",
             CopilotProviderEnvironment.ResolveModel(config));
+    }
+
+    /// <summary>
+    /// Selects the CLI-appropriate remote startup mechanism. CLIs before 1.0.103
+    /// take <c>--remote</c>; newer CLIs enable remote control through the
+    /// <c>remoteSessions</c> user setting.
+    /// </summary>
+    private bool PrepareRemoteSessions()
+    {
+        var useLegacyRemoteFlag = _copilotCli.SupportsLegacyRemoteFlag();
+        if (!useLegacyRemoteFlag)
+            _copilotSettings.EnsureRemoteSessionsEnabled();
+
+        return useLegacyRemoteFlag;
     }
 
     private static IntPtr BuildWindowsEnvironmentBlockWithOverrides(IEnumerable<KeyValuePair<string, string>> overrides)

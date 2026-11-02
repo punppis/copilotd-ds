@@ -82,6 +82,7 @@ public class Program
         serviceCollection.AddSingleton<StateStore>();
         serviceCollection.AddSingleton<RepoPathResolver>();
         serviceCollection.AddSingleton<CopilotTrustService>();
+        serviceCollection.AddSingleton<CopilotSettingsService>();
         serviceCollection.AddSingleton<ProcessManager>();
         serviceCollection.AddSingleton<GitHubRemoteSessionUrlResolver>();
         serviceCollection.AddSingleton<GhCliService>();

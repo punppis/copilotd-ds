@@ -16,7 +16,7 @@ Available for Windows, macOS, and Linux.
 
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
 - **PR watching** — opt-in pull request rules can dispatch review, validation, or follow-up sessions using PR metadata (labels, assignee, base/head branch, draft state, review decision)
-- **Automatic dispatch** — launches `copilot --remote` sessions with templated prompts derived from issue or PR metadata
+- **Automatic dispatch** — launches remote-enabled Copilot sessions with templated prompts derived from issue or PR metadata (`--remote` on CLI versions before 1.0.103; the `remoteSessions` setting on newer versions)
 - **Terminal-safe automation** — dispatched work sessions suppress browser launch environment variables so unattended agents stay in terminal/API workflows instead of popping open web pages
 - **Named dispatch rules** — flexible, composable rules with per-rule launch options (`--yolo`, `--allow-all-tools`, `--allow-all-urls`, `--model`, extra prompts, repo assignments)
 - **Session lifecycle** — full state machine with retry, backoff, orphan recovery, investigation feedback loops, PR review monitoring, and explicit completion signaling
@@ -25,7 +25,7 @@ Available for Windows, macOS, and Linux.
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive connection** — connect to any running remote-enabled session with `copilotd session connect` without stopping the orchestrated session (requires Copilot CLI 1.0.32+)
 - **Remote control session** — hosts a `copilot --remote` session for remotely managing copilotd via the GitHub remote sessions UI (web & mobile)
-- **Always-on remote agents** — keeps `agent_count` (default 3) independent `copilot --remote` sessions running, named per host, automatically restarted, and listed in `copilotd status`
+- **Always-on remote agents** — keeps `agent_count` (default 3) independent remote-enabled Copilot sessions running, named per host, automatically restarted, and listed in `copilotd status`
 - **DeepSeek by default** — uses the GitHub-hosted `Kitka-Games/DeepSeek/deepseek-flash` model, and automatically switches to direct DeepSeek BYOK when `DEEPSEEK_API_KEY` is available in `.env`
 - **Docker-ready** — multi-stage image and compose file that mount your host repo root, Copilot auth, and persistent state
 - **Cross-platform** — works on Windows, macOS, Linux, and containers
@@ -403,7 +403,7 @@ If the remote session URL has not been discovered yet, `session connect` fails w
 
 ### Control remote session
 
-When the daemon starts, it launches a special `copilot --remote` session that lets you remotely
+When the daemon starts, it launches a special remote-enabled Copilot session that lets you remotely
 monitor and manage copilotd from the [GitHub remote sessions UI](https://docs.github.com/copilot)
 on web and mobile. Through this session you can check daemon status, list sessions, reset stuck
 sessions, and more — all via natural language.
@@ -438,7 +438,7 @@ copilotd keeps a pool of independent, always-on `copilot --remote` agents ready 
 and management alongside the control session. They are **not** used for issue/PR dispatch.
 
 - `agent_count` (default `3`, valid range `0`–`16`) controls the pool size; `enable_agents` toggles it.
-- Each agent runs from its own folder under `~/.copilotd/agents/agent-N`.
+- Each agent runs from its own folder under `~/.copilotd/agents/agent-N` and is remote-enabled.
 - Names come from `agent_name_format`, default
   `(copilotd agent $(agent_index)) $(host)`. `$(host)` is the stable copilotd machine identifier,
   so agents from different hosts are distinguishable in the remote sessions UI. `$(machine_name)`,
@@ -450,6 +450,20 @@ and management alongside the control session. They are **not** used for issue/PR
 - `copilotd status` lists each agent with its PID and GitHub remote session URL.
 
 Disable the pool with `copilotd config --set enable_agents=false` or `copilotd config --set agent_count=0`.
+
+### Remote control and CLI versions
+
+Copilot CLI 1.0.103 retired the `--remote` startup flag. copilotd detects the installed version and
+uses the appropriate mechanism automatically:
+
+- **CLI before 1.0.103** — sessions launch with `--remote`.
+- **CLI 1.0.103 and newer** — copilotd sets `"remoteSessions": true` in the Copilot settings file
+  (`~/.copilot/settings.json`, or `$COPILOT_HOME/settings.json` when `COPILOT_HOME` is set) and
+  launches interactive sessions normally.
+
+The `remoteSessions` setting is user-wide, so it also enables remote control for Copilot CLI
+sessions started outside copilotd. If the settings file is read-only or cannot be updated, copilotd
+logs a warning and sessions may not be remotely steerable.
 
 ### Models and DeepSeek
 
@@ -505,6 +519,8 @@ Notes:
   bind-mounted files should be owned by your host user.
 - `dumb-init` forwards SIGTERM so the daemon gracefully stops agents, dispatch sessions, and the
   control session before the container exits.
+- The image installs the current Copilot CLI, so remote control uses the `remoteSessions` setting
+  in the mounted `~/.copilot` directory.
 - The container disables self-updates (`COPILOTD_DISABLE_SELF_UPDATES=1`); rebuild the image to
   update copilotd or the Copilot CLI.
 
