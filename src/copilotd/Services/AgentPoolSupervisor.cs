@@ -25,12 +25,10 @@ public sealed record AgentPoolReconcileResult(
 /// </summary>
 public sealed class AgentPoolSupervisor
 {
-    private static readonly TimeSpan RemoteUrlResolveTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan FailedRetryDelay = TimeSpan.FromSeconds(60);
 
     private readonly ProcessManager _processManager;
     private readonly CopilotTrustService _copilotTrustService;
-    private readonly GitHubRemoteSessionUrlResolver _remoteSessionUrls;
     private readonly ILogger<AgentPoolSupervisor> _logger;
     private bool _trustWarningShown;
     private bool _clampWarningLogged;
@@ -38,12 +36,10 @@ public sealed class AgentPoolSupervisor
     public AgentPoolSupervisor(
         ProcessManager processManager,
         CopilotTrustService copilotTrustService,
-        GitHubRemoteSessionUrlResolver remoteSessionUrls,
         ILogger<AgentPoolSupervisor> logger)
     {
         _processManager = processManager;
         _copilotTrustService = copilotTrustService;
-        _remoteSessionUrls = remoteSessionUrls;
         _logger = logger;
     }
 
@@ -87,7 +83,7 @@ public sealed class AgentPoolSupervisor
                 continue;
             }
 
-            if (!needsRename && IsHealthy(agent, config.CurrentUser))
+            if (!needsRename && IsHealthy(agent))
             {
                 running++;
                 continue;
@@ -189,19 +185,17 @@ public sealed class AgentPoolSupervisor
             && agent.ProcessId is null
             && agent.RootProcessId is null);
 
-    private bool IsHealthy(AgentSessionInfo agent, string? currentUser)
+    /// <summary>
+    /// Process liveness is the health signal for agents. Remote URL resolution can
+    /// lag behind startup (and depends on the CLI writing session state), so it must
+    /// not trigger relaunches; the status command reports the URL when available.
+    /// </summary>
+    private bool IsHealthy(AgentSessionInfo agent)
     {
         if (agent.Status != ControlSessionStatus.Running)
             return false;
 
-        if (_processManager.CheckAgentSession(agent) != ProcessLivenessResult.Alive)
-            return false;
-
-        if (_remoteSessionUrls.TryResolve(agent, currentUser) is not null)
-            return true;
-
-        var startedAt = agent.StartedAt ?? agent.UpdatedAt;
-        return startedAt is { } started && DateTimeOffset.UtcNow - started < RemoteUrlResolveTimeout;
+        return _processManager.CheckAgentSession(agent) == ProcessLivenessResult.Alive;
     }
 
     private void TerminateIfTracked(AgentSessionInfo agent)
