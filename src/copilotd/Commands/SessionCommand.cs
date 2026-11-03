@@ -518,8 +518,8 @@ public static class SessionCommand
 
                 var psi = new ProcessStartInfo
                 {
-                    FileName = "copilot",
-                    Arguments = $"--connect={taskId}",
+                    FileName = copilotCli.ExecutablePath,
+                    Arguments = copilotCli.BuildArguments($"--connect={taskId}"),
                     UseShellExecute = false,
                     RedirectStandardInput = false,
                     RedirectStandardOutput = false,
